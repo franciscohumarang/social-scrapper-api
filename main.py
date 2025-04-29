@@ -23,17 +23,6 @@ app = FastAPI()
 twitter_cache = {}
 CACHE_DURATION = 300  # 5 minutes in seconds
 
-# List of Nitter instances (updated with most reliable ones from https://github.com/zedeus/nitter/wiki/Instances)
-NITTER_INSTANCES = [
-    "https://nitter.net",  # Official instance
-    "https://xcancel.com",
-    "https://nitter.poast.org",
-    "https://nitter.privacyredirect.com",
-    "https://lightbrd.com",
-    "https://nitter.space",
-    "https://nitter.tiekoetter.com"
-]
-
 class SearchQuery(BaseModel):
     platform: str  # 'twitter' or 'reddit'
     query: str
@@ -42,115 +31,9 @@ class SearchQuery(BaseModel):
     sort: Optional[str] = "relevance"  # Reddit: relevance, hot, top, new, comments
     product: Optional[str] = "Latest"  # Twitter: Top, Latest, Media
 
-async def search_nitter(query: str, limit: int = 20):
-    # Randomize the list of instances
-    instances = NITTER_INSTANCES.copy()
-    random.shuffle(instances)
-    
-    for instance in instances:
-        try:
-            print(f"Trying Nitter instance: {instance}")
-            async with aiohttp.ClientSession() as session:
-                # Format query for Nitter
-                formatted_query = query.replace(" ", "+")
-                url = f"{instance}/search?f=tweets&q={formatted_query}"
-                print(f"Search URL: {url}")
-                
-                # Browser-like headers
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Cache-Control': 'max-age=0',
-                    'TE': 'Trailers',
-                    'DNT': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Pragma': 'no-cache'
-                }
-                
-                # Try to get response with SSL verification disabled
-                async with session.get(url, headers=headers, ssl=False) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        print(html)
-                        soup = BeautifulSoup(html, 'html.parser')
-                        timeline_container = soup.find('div', class_='timeline-container')
-                        if not timeline_container:
-                            print("No timeline-container found in HTML")
-                            return []
-                        timeline = timeline_container.find('div', class_='timeline')
-                        if not timeline:
-                            print("No timeline found in timeline-container")
-                            return []
-                        tweet_containers = timeline.find_all('div', class_='timeline-item')
-                        print(f"Found {len(tweet_containers)} tweet containers")
-                        tweets = []
-                        for container in tweet_containers[:limit]:
-                            try:
-                                # Extract tweet data
-                                tweet_link = container.find('a', class_='tweet-link')
-                                if not tweet_link:
-                                    continue
-                                    
-                                tweet_id = tweet_link['href'].split('/')[-1]
-                                username = container.find('a', class_='username').text.strip()
-                                content_div = container.find('div', class_='tweet-content')
-                                content = content_div.text.strip() if content_div else ""
-                                
-                                # Extract metrics
-                                stats = container.find_all('span', class_='tweet-stat')
-                                likes = 0
-                                retweets = 0
-                                if len(stats) >= 2:
-                                    likes = int(stats[0].text.strip().replace(',', '') or 0)
-                                    retweets = int(stats[1].text.strip().replace(',', '') or 0)
-                                
-                                # Extract timestamp
-                                timestamp = container.find('span', class_='tweet-date').find('a')['title']
-                                try:
-                                    created_at = datetime.strptime(timestamp, '%b %d, %Y · %I:%M %p %Z').isoformat()
-                                except:
-                                    created_at = datetime.now().isoformat()
-                                
-                                tweet_data = {
-                                    "platform": "twitter",
-                                    "id": tweet_id,
-                                    "author": username,
-                                    "content": content,
-                                    "created": created_at,
-                                    "likes": likes,
-                                    "retweets": retweets,
-                                    "url": f"https://twitter.com/{username}/status/{tweet_id}"
-                                }
-                                print(f"Parsed tweet: {tweet_data}")
-                                tweets.append(tweet_data)
-                            except Exception as e:
-                                print(f"Error parsing tweet: {str(e)}")
-                                continue
-                        
-                        if tweets:
-                            print(f"Successfully parsed {len(tweets)} tweets from {instance}")
-                            return tweets
-                        else:
-                            print(f"No tweets found in {instance}")
-                    else:
-                        print(f"Failed to get response from {instance}: {response.status}")
-        except Exception as e:
-            print(f"Error with {instance}: {str(e)}")
-            continue
-    
-    raise HTTPException(status_code=500, detail="All Nitter instances failed")
-
-async def search_tweepy(query: str, limit: int = 20):
-    bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+async def search_tweepy(query: str, limit: int = 20, bearer_token: str = None):
     if not bearer_token:
-        raise HTTPException(status_code=500, detail="Missing Twitter Bearer Token in environment variables.")
+        raise HTTPException(status_code=401, detail="Missing Twitter Bearer Token in X-API-KEY header.")
     client = tweepy.Client(bearer_token=bearer_token)
     try:
         tweets = client.search_recent_tweets(
@@ -174,6 +57,8 @@ async def search_tweepy(query: str, limit: int = 20):
                     "url": f"https://twitter.com/{user_map.get(tweet.author_id, tweet.author_id)}/status/{tweet.id}"
                 })
         return results
+    except tweepy.errors.Unauthorized as e:
+        raise HTTPException(status_code=401, detail="Invalid Twitter Bearer Token.")
     except tweepy.TooManyRequests as e:
         raise HTTPException(status_code=429, detail="Twitter API rate limit exceeded. Please try again later.")
     except Exception as e:
@@ -208,26 +93,22 @@ def init_praw():
 
 @app.post("/search")
 async def search_social(search: SearchQuery, api_key: str = Header(None, alias="X-API-KEY")):
-    expected_api_key = os.getenv("API_KEY")
-    print(f"Received API key: {api_key}")
-    print(f"Expected API key: {expected_api_key}")
-    if expected_api_key and api_key != expected_api_key:
-        raise HTTPException(status_code=403, detail="Invalid API key")
-
+    # For Twitter, use api_key as the Bearer Token
+    if search.platform.lower() == "twitter":
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing Twitter Bearer Token in X-API-KEY header.")
+        # Check cache first
+        cached_results = get_cached_twitter_results(search.query, search.limit)
+        if cached_results:
+            return {"results": cached_results, "source": "cache"}
+        # Search using Tweepy (Twitter API)
+        results = await search_tweepy(search.query, search.limit, bearer_token=api_key)
+        # Cache the results
+        cache_twitter_results(search.query, search.limit, results)
+        return {"results": results, "source": "api"}
+    # Reddit logic remains unchanged
     try:
-        if search.platform.lower() == "twitter":
-            # Check cache first
-            cached_results = get_cached_twitter_results(search.query, search.limit)
-            if cached_results:
-                return {"results": cached_results, "source": "cache"}
-
-            # Search using Tweepy (Twitter API)
-            results = await search_tweepy(search.query, search.limit)
-            # Cache the results
-            cache_twitter_results(search.query, search.limit, results)
-            return {"results": results, "source": "api"}
-
-        elif search.platform.lower() == "reddit":
+        if search.platform.lower() == "reddit":
             reddit = init_praw()
             results = []
             subreddit = reddit.subreddit(search.subreddit)
