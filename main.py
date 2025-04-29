@@ -4,12 +4,19 @@ from fastapi import FastAPI, HTTPException, Header
 from twscrape import API, gather
 import praw
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
+import json
+import time
+from datetime import datetime, timedelta
 
 load_dotenv()
 
 app = FastAPI()
+
+# Cache for Twitter results
+twitter_cache = {}
+CACHE_DURATION = 300  # 5 minutes in seconds
 
 class SearchQuery(BaseModel):
     platform: str  # 'twitter' or 'reddit'
@@ -19,20 +26,100 @@ class SearchQuery(BaseModel):
     sort: Optional[str] = "relevance"  # Reddit: relevance, hot, top, new, comments
     product: Optional[str] = "Latest"  # Twitter: Top, Latest, Media
 
+class TwitterAccount(BaseModel):
+    username: str
+    password: str
+    email: str
+    email_password: str
+
+def get_twitter_accounts() -> List[TwitterAccount]:
+    accounts = []
+    try:
+        # Try to read from JSON file first
+        if os.path.exists('twitter_accounts.json'):
+            with open('twitter_accounts.json', 'r') as f:
+                accounts_data = json.load(f)
+                print(f"Loaded accounts from JSON file: {len(accounts_data)} accounts")
+                for account in accounts_data:
+                    accounts.append(TwitterAccount(**account))
+                return accounts
+        
+        # Fallback to environment variable
+        accounts_json = os.getenv("TWITTER_ACCOUNTS")
+        print(f"Raw TWITTER_ACCOUNTS from env: {accounts_json}")
+        
+        if accounts_json:
+            try:
+                # Remove any surrounding quotes and whitespace
+                accounts_json = accounts_json.strip().strip("'").strip('"')
+                print(f"Cleaned accounts JSON: {accounts_json}")
+                
+                # Try to parse the JSON
+                try:
+                    accounts_data = json.loads(accounts_json)
+                except json.JSONDecodeError:
+                    # If that fails, try to fix common JSON formatting issues
+                    accounts_json = accounts_json.replace("'", '"')  # Replace single quotes with double quotes
+                    accounts_data = json.loads(accounts_json)
+                
+                print(f"Parsed accounts data: {accounts_data}")
+                for account in accounts_data:
+                    accounts.append(TwitterAccount(**account))
+                print(f"Successfully loaded {len(accounts)} Twitter accounts")
+            except Exception as e:
+                print(f"Error parsing Twitter accounts: {str(e)}")
+                print(f"Error type: {type(e)}")
+                print(f"Error details: {e.__dict__}")
+        else:
+            print("TWITTER_ACCOUNTS environment variable is not set")
+    except Exception as e:
+        print(f"Error loading Twitter accounts: {str(e)}")
+    
+    return accounts
+
 async def init_twscrape():
     api = API()
-    username = os.getenv("X_USERNAME")
-    password = os.getenv("X_PASSWORD")
-    email = os.getenv("X_EMAIL")
-    email_password = os.getenv("X_EMAIL_PASSWORD")
-    if not all([username, password, email, email_password]):
-        raise ValueError("Missing X account credentials")
+    accounts = get_twitter_accounts()
     
-    # Add account if not exists
-    await api.pool.add_account(username, password, email, email_password)
+    if not accounts:
+        raise ValueError("No Twitter accounts configured")
+    
+    print(f"Initializing twscrape with {len(accounts)} accounts")
+    
+    # Add all accounts
+    for account in accounts:
+        try:
+            print(f"Adding account: {account.username}")
+            await api.pool.add_account(
+                account.username,
+                account.password,
+                account.email,
+                account.email_password
+            )
+            print(f"Successfully added account: {account.username}")
+        except Exception as e:
+            print(f"Error adding account {account.username}: {str(e)}")
+    
     # Login all accounts
+    print("Logging in all accounts...")
     await api.pool.login_all()
+    print("All accounts logged in successfully")
     return api
+
+def get_cached_twitter_results(query: str, limit: int):
+    cache_key = f"{query}_{limit}"
+    if cache_key in twitter_cache:
+        cache_data = twitter_cache[cache_key]
+        if datetime.now().timestamp() - cache_data['timestamp'] < CACHE_DURATION:
+            return cache_data['results']
+    return None
+
+def cache_twitter_results(query: str, limit: int, results: list):
+    cache_key = f"{query}_{limit}"
+    twitter_cache[cache_key] = {
+        'results': results,
+        'timestamp': datetime.now().timestamp()
+    }
 
 def init_praw():
     client_id = os.getenv("REDDIT_CLIENT_ID")
@@ -56,8 +143,18 @@ async def search_social(search: SearchQuery, api_key: str = Header(None, alias="
 
     try:
         if search.platform.lower() == "twitter":
+            # Check cache first
+            cached_results = get_cached_twitter_results(search.query, search.limit)
+            if cached_results:
+                return {"results": cached_results, "source": "cache"}
+
             api = await init_twscrape()
             results = []
+            
+            # Add delay between requests
+            delay = 2  # seconds
+            count = 0
+            
             async for tweet in api.search(search.query, limit=search.limit, kv={"product": search.product}):
                 results.append({
                     "platform": "twitter",
@@ -69,7 +166,16 @@ async def search_social(search: SearchQuery, api_key: str = Header(None, alias="
                     "retweets": tweet.retweetCount,
                     "url": f"https://x.com/{tweet.user.username}/status/{tweet.id}"
                 })
-            return {"results": results}
+                
+                # Add delay every 10 tweets
+                count += 1
+                if count % 10 == 0:
+                    await asyncio.sleep(delay)
+            
+            # Cache the results
+            cache_twitter_results(search.query, search.limit, results)
+            
+            return {"results": results, "source": "api"}
 
         elif search.platform.lower() == "reddit":
             reddit = init_praw()
