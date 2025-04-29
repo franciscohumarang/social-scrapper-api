@@ -174,6 +174,8 @@ async def search_tweepy(query: str, limit: int = 20):
                     "url": f"https://twitter.com/{user_map.get(tweet.author_id, tweet.author_id)}/status/{tweet.id}"
                 })
         return results
+    except tweepy.TooManyRequests as e:
+        raise HTTPException(status_code=429, detail="Twitter API rate limit exceeded. Please try again later.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Tweepy error: {str(e)}")
 
