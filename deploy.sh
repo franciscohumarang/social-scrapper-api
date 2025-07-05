@@ -58,10 +58,18 @@ if [ ! -f .env ]; then
 # API Key for authentication
 API_KEY=your_api_key_here
 
-# Reddit API credentials
+# Twitter API v1 credentials (required for DM functionality)
+TWITTER_CONSUMER_KEY=your_twitter_consumer_key
+TWITTER_CONSUMER_SECRET=your_twitter_consumer_secret
+
+# Reddit API credentials (read-only operations)
 REDDIT_CLIENT_ID=your_reddit_client_id
 REDDIT_CLIENT_SECRET=your_reddit_client_secret
 REDDIT_USER_AGENT=your_reddit_user_agent
+
+# Reddit Script Application credentials (required for DM functionality)
+REDDIT_USERNAME=your_reddit_username
+REDDIT_PASSWORD=your_reddit_password
 EOF
     echo "Please update the .env file with your actual credentials"
 fi
