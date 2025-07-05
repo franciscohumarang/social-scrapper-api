@@ -26,7 +26,7 @@ CACHE_DURATION = 300  # 5 minutes in seconds
 class SearchQuery(BaseModel):
     platform: str  # 'twitter' or 'reddit'
     query: str
-    limit: Optional[int] = 20
+    limit: Optional[int] = 100
     subreddit: Optional[str] = "all"  # Reddit-specific
     sort: Optional[str] = "relevance"  # Reddit: relevance, hot, top, new, comments
     product: Optional[str] = "Latest"  # Twitter: Top, Latest, Media
@@ -60,14 +60,14 @@ def init_twitter_v1_api(bearer_token: str, access_token: str = None, access_toke
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Twitter API: {str(e)}")
 
-async def search_tweepy(query: str, limit: int = 100, bearer_token: str = None):
+async def search_tweepy(query: str, limit: int = 5, bearer_token: str = None):
     if not bearer_token:
         raise HTTPException(status_code=401, detail="Missing Twitter Bearer Token in X-API-KEY header.")
     client = tweepy.Client(bearer_token=bearer_token)
     try:
         tweets = client.search_recent_tweets(
             query=query,
-            max_results=min(limit, 100),  # Twitter API max is 100 per request
+            max_results=min(limit, 5),  # Twitter API max is 100 per request
             tweet_fields=["created_at", "author_id", "public_metrics"],
             expansions=["author_id"]
         )
