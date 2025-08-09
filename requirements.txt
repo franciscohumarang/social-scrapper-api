@@ -11,4 +11,5 @@ selenium
 webdriver-manager
 ntscraper
 requests
+asyncpraw
 

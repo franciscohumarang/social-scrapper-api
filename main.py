@@ -1,8 +1,11 @@
 import asyncio
 import os
 from fastapi import FastAPI, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 import aiohttp
+import requests
 import praw
+from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from typing import Optional, List
 from dotenv import load_dotenv
@@ -18,6 +21,15 @@ import tweepy
 load_dotenv()
 
 app = FastAPI()
+
+# Add CORS middleware to handle OPTIONS requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 # Cache for Twitter results
 twitter_cache = {}
@@ -59,6 +71,71 @@ def init_twitter_v1_api(bearer_token: str, access_token: str = None, access_toke
         return api
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Twitter API: {str(e)}")
+
+def search_twitterapi_io_sync(query: str, limit: int = 5, product: str = "Latest", api_key: str = None):
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing TwitterAPI.io API Key in X-API-KEY header.")
+    
+    url = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+    headers = {
+        "X-API-Key": api_key,
+        "Content-Type": "application/json"
+    }
+    
+    # Map product type to queryType
+    query_type = "Latest" if product == "Latest" else "Top"
+    
+    params = {
+        "query": query,
+        "queryType": query_type,
+        "cursor": ""
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        if response.status_code == 401:
+            raise HTTPException(status_code=401, detail="Invalid TwitterAPI.io API Key.")
+        elif response.status_code == 429:
+            raise HTTPException(status_code=429, detail="TwitterAPI.io rate limit exceeded. Please try again later.")
+        elif response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=f"TwitterAPI.io error: {response.status_code}")
+        
+        data = response.json()
+        results = []
+        
+        if "tweets" in data and data["tweets"]:
+            tweet_count = 0
+            for tweet in data["tweets"]:
+                if tweet_count >= limit:
+                    break
+                
+                # Extract author information
+                author_info = tweet.get("author", {})
+                author_username = author_info.get("username", "unknown")
+                author_id = author_info.get("id", "unknown")
+                
+                # Extract engagement metrics
+                public_metrics = tweet.get("public_metrics", {})
+                
+                results.append({
+                    "platform": "twitter",
+                    "id": tweet.get("id", ""),
+                    "author": author_username,
+                    "author_id": author_id,
+                    "content": tweet.get("text", ""),
+                    "created": tweet.get("created_at"),
+                    "likes": public_metrics.get("like_count", 0),
+                    "retweets": public_metrics.get("retweet_count", 0),
+                    "url": tweet.get("url", f"https://twitter.com/{author_username}/status/{tweet.get('id', '')}")
+                })
+                tweet_count += 1
+        
+        return results
+        
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"TwitterAPI.io connection error: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TwitterAPI.io error: {str(e)}")
 
 async def search_twitterapi_io(query: str, limit: int = 5, product: str = "Latest", api_key: str = None):
     if not api_key:
@@ -165,13 +242,15 @@ async def get_reddit_user_by_username(username: str):
         
         # Try to access some basic info to verify the user exists
         # Note: Reddit API doesn't provide much public info about users
-        return {
+        result = {
             "username": username,
             "id": username,  # For Reddit, the username is the ID
             "name": username,
             "description": "Reddit user",
             "platform": "reddit"
         }
+        
+        return result
         
     except praw.exceptions.APIException as e:
         if "USER_DOESNT_EXIST" in str(e):
@@ -330,7 +409,7 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
             message=message
         )
         
-        return {
+        result = {
             "success": True,
             "recipient_username": recipient_username,
             "sender_username": sender_username,
@@ -338,6 +417,8 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
             "subject": subject or "Message from Social Scraper API",
             "platform": "reddit"
         }
+        
+        return result
         
     except praw.exceptions.APIException as e:
         if "USER_DOESNT_EXIST" in str(e):
@@ -397,13 +478,22 @@ def cache_twitter_results(query: str, limit: int, results: list):
         'results': results,
         'timestamp': datetime.now().timestamp()
     }
-
 def init_praw():
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
     user_agent = os.getenv("REDDIT_USER_AGENT")
-    if not all([client_id, client_secret, user_agent]):
-        raise ValueError("Missing Reddit API credentials")
+
+    missing = []
+    if not client_id:
+        missing.append("REDDIT_CLIENT_ID")
+    if not client_secret:
+        missing.append("REDDIT_CLIENT_SECRET")
+    if not user_agent:
+        missing.append("REDDIT_USER_AGENT")
+    
+    if missing:
+        raise ValueError(f"Missing Reddit API credentials: {', '.join(missing)}")
+    
     return praw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
@@ -433,7 +523,7 @@ def init_praw_script():
     )
 
 @app.post("/search")
-async def search_social(search: SearchQuery):
+def search_social(search: SearchQuery):
     # For Twitter, use TwitterAPI.io API Key from environment
     if search.platform.lower() == "twitter":
         api_key = os.getenv("TWITTER_API_IO_KEY")
@@ -443,12 +533,12 @@ async def search_social(search: SearchQuery):
         cached_results = get_cached_twitter_results(search.query, search.limit)
         if cached_results:
             return {"results": cached_results, "source": "cache"}
-        # Search using TwitterAPI.io
-        results = await search_twitterapi_io(search.query, search.limit, product=search.product, api_key=api_key)
+        # Search using TwitterAPI.io (synchronous)
+        results = search_twitterapi_io_sync(search.query, search.limit, product=search.product, api_key=api_key)
         # Cache the results
         cache_twitter_results(search.query, search.limit, results)
         return {"results": results, "source": "api"}
-    # Reddit logic remains unchanged
+    # Reddit logic with PRAW (synchronous)
     try:
         if search.platform.lower() == "reddit":
             reddit = init_praw()
@@ -469,7 +559,7 @@ async def search_social(search: SearchQuery):
                     "num_comments": submission.num_comments,
                     "url": submission.url
                 })
-                
+            
                 # Search comments in the submission
                 submission.comments.replace_more(limit=0)  # Limit comment depth
                 for comment in submission.comments.list():
@@ -486,12 +576,19 @@ async def search_social(search: SearchQuery):
                             "parent_id": comment.parent_id,
                             "url": f"https://reddit.com{comment.permalink}"
                         })
-            
+            print("results", results)
             return {"results": results}
 
         else:
             raise HTTPException(status_code=400, detail="Invalid platform. Use 'twitter' or 'reddit'.")
 
+    except praw.exceptions.APIException as e:
+        if "403" in str(e) or "Forbidden" in str(e):
+            raise HTTPException(status_code=403, detail="Reddit API access forbidden. Check Reddit app credentials.")
+        elif "401" in str(e) or "Unauthorized" in str(e):
+            raise HTTPException(status_code=401, detail="Reddit API unauthorized. Check Reddit app credentials.")
+        else:
+            raise HTTPException(status_code=500, detail=f"Reddit API error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
