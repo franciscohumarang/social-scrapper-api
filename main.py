@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 import aiohttp
 import requests
-import praw
+import asyncpraw
 from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 from typing import Optional, List
@@ -234,11 +234,11 @@ async def get_user_by_username(username: str, bearer_token: str = None):
 
 async def get_reddit_user_by_username(username: str):
     """
-    Get Reddit user information by username using PRAW
+    Get Reddit user information by username using asyncpraw
     """
     try:
-        reddit = init_praw()
-        redditor = reddit.redditor(username)
+        reddit = await init_asyncpraw()
+        redditor = await reddit.redditor(username)
         
         # Try to access some basic info to verify the user exists
         # Note: Reddit API doesn't provide much public info about users
@@ -250,9 +250,10 @@ async def get_reddit_user_by_username(username: str):
             "platform": "reddit"
         }
         
+        await reddit.close()
         return result
         
-    except praw.exceptions.APIException as e:
+    except asyncpraw.exceptions.AsyncPRAWException as e:
         if "USER_DOESNT_EXIST" in str(e):
             raise HTTPException(status_code=404, detail="Reddit user not found.")
         else:
@@ -374,7 +375,7 @@ async def send_direct_message(recipient_id: str, message: str, media_ids: List[s
 async def send_reddit_direct_message(recipient_username: str, message: str, subject: str = None, 
                                    sender_username: str = None, sender_password: str = None):
     """
-    Send a direct message to a Reddit user using PRAW with script authentication
+    Send a direct message to a Reddit user using asyncpraw with script authentication
     Requires sender_username and sender_password (no fallback to environment variables)
     """
     try:
@@ -390,8 +391,8 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
         if not all([client_id, client_secret, user_agent]):
             raise ValueError("Missing Reddit app credentials in environment variables")
         
-        # Initialize PRAW with provided user credentials
-        reddit = praw.Reddit(
+        # Initialize asyncpraw with provided user credentials
+        reddit = asyncpraw.Reddit(
             client_id=client_id,
             client_secret=client_secret,
             user_agent=user_agent,
@@ -400,10 +401,10 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
         )
         
         # Verify the recipient user exists
-        recipient = reddit.redditor(recipient_username)
+        recipient = await reddit.redditor(recipient_username)
         
-        # Send the message using PRAW's message method
-        reddit.message(
+        # Send the message using asyncpraw's message method
+        await reddit.message(
             recipient=recipient_username,
             subject=subject or "Message from Social Scraper API",
             message=message
@@ -418,9 +419,10 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
             "platform": "reddit"
         }
         
+        await reddit.close()
         return result
         
-    except praw.exceptions.APIException as e:
+    except asyncpraw.exceptions.AsyncPRAWException as e:
         if "USER_DOESNT_EXIST" in str(e):
             raise HTTPException(status_code=404, detail="Reddit user not found.")
         elif "RATELIMIT" in str(e):
@@ -431,8 +433,6 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
             raise HTTPException(status_code=403, detail="Cannot send DM to this user. They may have DMs disabled.")
         else:
             raise HTTPException(status_code=400, detail=f"Reddit API error: {str(e)}")
-    except praw.exceptions.InvalidImplicitAuth as e:
-        raise HTTPException(status_code=401, detail="Invalid Reddit credentials. Check username and password.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send Reddit DM: {str(e)}")
 
@@ -478,7 +478,7 @@ def cache_twitter_results(query: str, limit: int, results: list):
         'results': results,
         'timestamp': datetime.now().timestamp()
     }
-def init_praw():
+async def init_asyncpraw():
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
     user_agent = os.getenv("REDDIT_USER_AGENT")
@@ -494,15 +494,15 @@ def init_praw():
     if missing:
         raise ValueError(f"Missing Reddit API credentials: {', '.join(missing)}")
     
-    return praw.Reddit(
+    return asyncpraw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
         user_agent=user_agent
     )
 
-def init_praw_script():
+async def init_asyncpraw_script():
     """
-    Initialize PRAW with script application credentials for DM operations
+    Initialize asyncpraw with script application credentials for DM operations
     Requires username and password for script applications
     """
     client_id = os.getenv("REDDIT_CLIENT_ID")
@@ -513,8 +513,8 @@ def init_praw_script():
     
     if not all([client_id, client_secret, user_agent, username, password]):
         raise ValueError("Missing Reddit script application credentials (client_id, client_secret, user_agent, username, password)")
-    
-    return praw.Reddit(
+
+    return asyncpraw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
         user_agent=user_agent,
@@ -523,36 +523,51 @@ def init_praw_script():
     )
 
 @app.post("/search")
-def search_social(search: SearchQuery):
+async def search_social(search: SearchQuery, api_key: str = Header(None, alias="API-KEY")):
+    # Validate API key against REDDIT_CLIENT_SECRET
+    reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API-KEY header")
+    if api_key != reddit_client_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API key")
+    
     # For Twitter, use TwitterAPI.io API Key from environment
     if search.platform.lower() == "twitter":
-        api_key = os.getenv("TWITTER_API_IO_KEY")
-        if not api_key:
+        twitter_api_key = os.getenv("TWITTER_API_IO_KEY")
+        if not twitter_api_key:
             raise HTTPException(status_code=500, detail="Missing TWITTER_API_IO_KEY in environment variables. Required for Twitter searches.")
         # Check cache first
         cached_results = get_cached_twitter_results(search.query, search.limit)
         if cached_results:
             return {"results": cached_results, "source": "cache"}
         # Search using TwitterAPI.io (synchronous)
-        results = search_twitterapi_io_sync(search.query, search.limit, product=search.product, api_key=api_key)
+        results = search_twitterapi_io_sync(search.query, search.limit, product=search.product, api_key=twitter_api_key)
         # Cache the results
         cache_twitter_results(search.query, search.limit, results)
         return {"results": results, "source": "api"}
-    # Reddit logic with PRAW (synchronous)
+    # Reddit logic with asyncpraw (asynchronous)
     try:
         if search.platform.lower() == "reddit":
-            reddit = init_praw()
+            reddit = await init_asyncpraw()
             results = []
-            subreddit = reddit.subreddit(search.subreddit)
+            subreddit = await reddit.subreddit(search.subreddit)
             
             # Search submissions
-            for submission in subreddit.search(search.query, sort=search.sort, limit=search.limit):
+            async for submission in subreddit.search(search.query, sort=search.sort, limit=search.limit):
+                # Get author name safely
+                author_name = "Unknown"
+                if submission.author:
+                    try:
+                        author_name = submission.author.name
+                    except:
+                        author_name = "Unknown"
+                
                 results.append({
                     "platform": "reddit",
                     "type": "submission",
                     "id": submission.id,
-                    "author": submission.author.name if submission.author else "Unknown",
-                    "author_id": submission.author.name if submission.author else "Unknown",  # For Reddit, author_id is the username
+                    "author": author_name,
+                    "author_id": author_name,  # For Reddit, author_id is the username
                     "content": submission.title,
                     "created": submission.created_utc,
                     "score": submission.score,
@@ -561,28 +576,51 @@ def search_social(search: SearchQuery):
                 })
             
                 # Search comments in the submission
-                submission.comments.replace_more(limit=0)  # Limit comment depth
-                for comment in submission.comments.list():
-                    if search.query.lower() in comment.body.lower():
-                        results.append({
-                            "platform": "reddit",
-                            "type": "comment",
-                            "id": comment.id,
-                            "author": comment.author.name if comment.author else "Unknown",
-                            "author_id": comment.author.name if comment.author else "Unknown",  # For Reddit, author_id is the username
-                            "content": comment.body,
-                            "created": comment.created_utc,
-                            "score": comment.score,
-                            "parent_id": comment.parent_id,
-                            "url": f"https://reddit.com{comment.permalink}"
-                        })
+                try:
+                    # Load submission comments
+                    await submission.load()
+                    if submission.comments:
+                        await submission.comments.replace_more(limit=0)
+                        # Get all comments as a list
+                        all_comments = await submission.comments.list()
+                        if all_comments:
+                            for comment in all_comments:
+                                if (hasattr(comment, 'body') and 
+                                    hasattr(comment, 'id') and 
+                                    search.query.lower() in comment.body.lower()):
+                                    # Get comment author name safely
+                                    comment_author = "Unknown"
+                                    if comment.author:
+                                        try:
+                                            comment_author = comment.author.name
+                                        except:
+                                            comment_author = "Unknown"
+                                    
+                                    results.append({
+                                        "platform": "reddit",
+                                        "type": "comment",
+                                        "id": comment.id,
+                                        "author": comment_author,
+                                        "author_id": comment_author,  # For Reddit, author_id is the username
+                                        "content": comment.body,
+                                        "created": comment.created_utc,
+                                        "score": comment.score,
+                                        "parent_id": comment.parent_id,
+                                        "url": f"https://reddit.com{comment.permalink}"
+                                    })
+                except Exception as comment_error:
+                    # Skip comment processing if there's an error, but continue with submissions
+                    print(f"Error processing comments for submission {submission.id}: {comment_error}")
+                    pass
+            
+            await reddit.close()
             print("results", results)
             return {"results": results}
 
         else:
             raise HTTPException(status_code=400, detail="Invalid platform. Use 'twitter' or 'reddit'.")
 
-    except praw.exceptions.APIException as e:
+    except asyncpraw.exceptions.AsyncPRAWException as e:
         if "403" in str(e) or "Forbidden" in str(e):
             raise HTTPException(status_code=403, detail="Reddit API access forbidden. Check Reddit app credentials.")
         elif "401" in str(e) or "Unauthorized" in str(e):
