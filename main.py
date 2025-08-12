@@ -391,22 +391,22 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
         if not all([client_id, client_secret, user_agent]):
             raise ValueError("Missing Reddit app credentials in environment variables")
         
-        # Initialize asyncpraw with provided user credentials
+        # Initialize asyncpraw with provided user credentials (script app)
         reddit = asyncpraw.Reddit(
             client_id=client_id,
             client_secret=client_secret,
             user_agent=user_agent,
             username=sender_username,
-            password=sender_password
+            password=sender_password,
+            check_for_async=False
         )
         
         # Verify the recipient user exists
         recipient = await reddit.redditor(recipient_username)
         
         # Send the message using asyncpraw's message method
-        await reddit.message(
-            recipient=recipient_username,
-            subject=subject or "Message from Social Scraper API",
+        await recipient.message(
+            subject=subject or "re: your post",
             message=message
         )
         
@@ -415,7 +415,7 @@ async def send_reddit_direct_message(recipient_username: str, message: str, subj
             "recipient_username": recipient_username,
             "sender_username": sender_username,
             "message": message,
-            "subject": subject or "Message from Social Scraper API",
+            "subject": subject or "re: your post",
             "platform": "reddit"
         }
         
