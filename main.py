@@ -1,7 +1,8 @@
 import asyncio
 import os
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import aiohttp
 import requests
 import asyncpraw
@@ -17,10 +18,24 @@ import random
 import brotli
 import ssl
 import tweepy
+from supabase import create_client, Client
+import jwt
 
 load_dotenv()
 
 app = FastAPI()
+
+# Initialize Supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_anon_key = os.getenv("SUPABASE_ANON_KEY")
+
+if not all([supabase_url, supabase_anon_key]):
+    raise ValueError("Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables.")
+
+supabase: Client = create_client(supabase_url, supabase_anon_key)
+
+# Security scheme for Bearer token
+security = HTTPBearer()
 
 # Add CORS middleware to handle OPTIONS requests
 app.add_middleware(
@@ -34,6 +49,47 @@ app.add_middleware(
 # Cache for Twitter results
 twitter_cache = {}
 CACHE_DURATION = 300  # 5 minutes in seconds
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """
+    Extract and validate user from Supabase JWT token
+    Returns user ID and fetches user settings from database
+    """
+    try:
+        token = credentials.credentials
+        
+        # Use Supabase to validate the token and get user info
+        # Set the auth header for this request
+        supabase.auth.set_session(token)
+        
+        # Get the user from the token
+        user = supabase.auth.get_user(token)
+        if not user or not user.user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        user_id = user.user.id
+        
+        # Fetch user data from users table
+        user_response = supabase.table("users").select("*").eq("id", user_id).execute()
+        user_data = user_response.data[0] if user_response.data else None
+        
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found in database")
+        
+        # Fetch user settings
+        settings_response = supabase.table("settings").select("*").eq("user_id", user_id).execute()
+        settings = settings_response.data[0] if settings_response.data else {}
+        
+        return {
+            "user_id": user_id,
+            "user": user_data,
+            "settings": settings
+        }
+        
+    except Exception as e:
+        if "Invalid token" in str(e) or "expired" in str(e).lower():
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
 
 class SearchQuery(BaseModel):
     platform: str  # 'twitter' or 'reddit'
@@ -478,6 +534,18 @@ def cache_twitter_results(query: str, limit: int, results: list):
         'results': results,
         'timestamp': datetime.now().timestamp()
     }
+async def init_asyncpraw_with_credentials(client_id: str, client_secret: str):
+    """
+    Initialize asyncpraw with provided credentials
+    """
+    user_agent = os.getenv("REDDIT_USER_AGENT") or "SocialScrapperAPI/1.0"
+    
+    return asyncpraw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        user_agent=user_agent
+    )
+
 async def init_asyncpraw():
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
@@ -523,19 +591,20 @@ async def init_asyncpraw_script():
     )
 
 @app.post("/search")
-async def search_social(search: SearchQuery, api_key: str = Header(None, alias="API-KEY")):
-    # Validate API key against REDDIT_CLIENT_SECRET
-    reddit_client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Missing API-KEY header")
-    if api_key != reddit_client_secret:
-        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API key")
+async def search_social(search: SearchQuery, current_user: dict = Depends(get_current_user)):
+    """
+    Search for posts on Twitter or Reddit
+    Requires Supabase JWT authentication
+    """
+    user_id = current_user["user_id"]
+    settings = current_user["settings"]
     
-    # For Twitter, use TwitterAPI.io API Key from environment
+    # For Twitter, use user's API key from settings or fallback to environment
     if search.platform.lower() == "twitter":
-        twitter_api_key = os.getenv("TWITTER_API_IO_KEY")
+        # Get Twitter API key from user settings or environment
+        twitter_api_key = settings.get("x_api_key") or os.getenv("TWITTER_API_IO_KEY")
         if not twitter_api_key:
-            raise HTTPException(status_code=500, detail="Missing TWITTER_API_IO_KEY in environment variables. Required for Twitter searches.")
+            raise HTTPException(status_code=400, detail="Twitter API key not configured. Please add your X API key in settings.")
         # Check cache first
         cached_results = get_cached_twitter_results(search.query, search.limit)
         if cached_results:
@@ -548,7 +617,14 @@ async def search_social(search: SearchQuery, api_key: str = Header(None, alias="
     # Reddit logic with asyncpraw (asynchronous)
     try:
         if search.platform.lower() == "reddit":
-            reddit = await init_asyncpraw()
+            # Use user's Reddit credentials from settings
+            reddit_client_id = settings.get("reddit_client_id") or os.getenv("REDDIT_CLIENT_ID")
+            reddit_client_secret = settings.get("reddit_client_secret") or os.getenv("REDDIT_CLIENT_SECRET")
+            
+            if not reddit_client_id or not reddit_client_secret:
+                raise HTTPException(status_code=400, detail="Reddit API credentials not configured. Please add your Reddit app credentials in settings.")
+            
+            reddit = await init_asyncpraw_with_credentials(reddit_client_id, reddit_client_secret)
             results = []
             subreddit = await reddit.subreddit(search.subreddit)
             
@@ -633,25 +709,13 @@ async def search_social(search: SearchQuery, api_key: str = Header(None, alias="
 @app.post("/send-dm")
 async def send_direct_message_endpoint(
     dm_request: DirectMessageRequest,
-    twitter_username: str = Header(None, alias="X-TWITTER-USERNAME"),
-    twitter_email: str = Header(None, alias="X-TWITTER-EMAIL"),
-    twitter_password: str = Header(None, alias="X-TWITTER-PASSWORD"),
-    reddit_username: str = Header(None, alias="X-REDDIT-USERNAME"),
-    reddit_password: str = Header(None, alias="X-REDDIT-PASSWORD")
+    current_user: dict = Depends(get_current_user)
 ):
     """
     Send a direct message to a Twitter or Reddit user
+    Requires Supabase JWT authentication
     
-    Headers required based on platform:
-    
-    For Twitter:
-    - X-TWITTER-USERNAME: Twitter username (required)
-    - X-TWITTER-EMAIL: Twitter email (required)
-    - X-TWITTER-PASSWORD: Twitter password (required)
-    
-    For Reddit:
-    - X-REDDIT-USERNAME: Reddit username (required)
-    - X-REDDIT-PASSWORD: Reddit password (required)
+    Credentials are fetched from user settings table based on authenticated user.
     
     Body:
     - platform: 'twitter' or 'reddit'
@@ -659,70 +723,64 @@ async def send_direct_message_endpoint(
     - message: The message to send
     - media_ids: Optional list of media IDs to attach (Twitter only)
     - subject: Optional subject for Reddit messages
-    
-    Environment variables required for Twitter:
-    - TWITTER_API_IO_KEY: TwitterAPI.io API Key
-    - TWITTER_PROXY: Proxy URL for login operations
     """
     
-    # Validate platform-specific headers
+    user_id = current_user["user_id"]
+    settings = current_user["settings"]
+    
+    # Validate platform-specific credentials from settings
     if dm_request.platform.lower() == "twitter":
+        twitter_username = settings.get("twitter_username")
         if not twitter_username:
-            raise HTTPException(status_code=401, detail="Missing X-TWITTER-USERNAME header. Required for Twitter DMs.")
-        if not twitter_email:
-            raise HTTPException(status_code=401, detail="Missing X-TWITTER-EMAIL header. Required for Twitter DMs.")
-        if not twitter_password:
-            raise HTTPException(status_code=401, detail="Missing X-TWITTER-PASSWORD header. Required for Twitter DMs.")
+            raise HTTPException(status_code=400, detail="Twitter username not configured. Please add your Twitter credentials in settings.")
+            
+        # Note: For security, we don't store Twitter email/password in settings
+        # This would need to be handled differently (e.g., OAuth tokens)
+        raise HTTPException(status_code=501, detail="Twitter DM functionality requires OAuth implementation for security. Password-based authentication is not supported in user settings.")
+        
     elif dm_request.platform.lower() == "reddit":
+        reddit_username = settings.get("reddit_username")
         if not reddit_username:
-            raise HTTPException(status_code=401, detail="Missing X-REDDIT-USERNAME header. Required for Reddit DMs.")
-        if not reddit_password:
-            raise HTTPException(status_code=401, detail="Missing X-REDDIT-PASSWORD header. Required for Reddit DMs.")
+            raise HTTPException(status_code=400, detail="Reddit username not configured. Please add your Reddit credentials in settings.")
+            
+        # Note: For security, we don't store Reddit password in settings  
+        # This would need to be handled differently (e.g., OAuth tokens)
+        raise HTTPException(status_code=501, detail="Reddit DM functionality requires secure credential handling. Password storage in settings is not recommended for security reasons.")
+        
     else:
         raise HTTPException(status_code=400, detail="Invalid platform. Use 'twitter' or 'reddit'.")
-    
-    return await send_direct_message_unified(
-        platform=dm_request.platform,
-        recipient_id=dm_request.recipient_id,
-        message=dm_request.message,
-        media_ids=dm_request.media_ids,
-        subject=dm_request.subject,
-        twitter_username=twitter_username,
-        twitter_email=twitter_email,
-        twitter_password=twitter_password,
-        reddit_username=reddit_username,
-        reddit_password=reddit_password
-    )
 
 @app.get("/user/{username}")
-async def get_user_info(username: str):
+async def get_user_info(username: str, current_user: dict = Depends(get_current_user)):
     """
-    Get user information by username
-    
-    Environment variables required:
-    - TWITTER_BEARER_TOKEN: Twitter Bearer Token
+    Get Twitter user information by username
+    Requires Supabase JWT authentication
     
     Returns user information including the user ID (recipient_id for DMs)
     """
-    bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+    settings = current_user["settings"]
+    
+    # Use user's Twitter API key or fall back to environment
+    bearer_token = settings.get("x_api_key") or os.getenv("TWITTER_BEARER_TOKEN")
     if not bearer_token:
-        raise HTTPException(status_code=500, detail="Missing TWITTER_BEARER_TOKEN in environment variables.")
+        raise HTTPException(status_code=400, detail="Twitter Bearer Token not configured. Please add your Twitter API credentials in settings.")
     return await get_user_by_username(username, bearer_token)
 
 @app.get("/user/{platform}/{username}")
-async def get_user_info_platform(platform: str, username: str):
+async def get_user_info_platform(platform: str, username: str, current_user: dict = Depends(get_current_user)):
     """
     Get user information by username for a specific platform
-    
-    Environment variables required for Twitter:
-    - TWITTER_BEARER_TOKEN: Twitter Bearer Token
+    Requires Supabase JWT authentication
     
     Returns user information including the user ID (recipient_id for DMs)
     """
+    settings = current_user["settings"]
+    
     if platform.lower() == "twitter":
-        bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+        # Use user's Twitter API key or fall back to environment
+        bearer_token = settings.get("x_api_key") or os.getenv("TWITTER_BEARER_TOKEN")
         if not bearer_token:
-            raise HTTPException(status_code=500, detail="Missing TWITTER_BEARER_TOKEN in environment variables.")
+            raise HTTPException(status_code=400, detail="Twitter Bearer Token not configured. Please add your Twitter API credentials in settings.")
         return await get_user_by_username(username, bearer_token)
     elif platform.lower() == "reddit":
         return await get_reddit_user_by_username(username)

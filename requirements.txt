@@ -11,4 +11,6 @@ selenium
 webdriver-manager
 ntscraper
 requests
+supabase
+PyJWT==2.8.0
 
