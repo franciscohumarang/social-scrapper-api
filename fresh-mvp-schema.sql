@@ -91,9 +91,12 @@ CREATE TABLE settings (
   
   -- API Credentials
   reddit_client_id TEXT,
-  reddit_client_secret TEXT
+  reddit_client_secret TEXT,
   reddit_username TEXT,
+  reddit_password TEXT, -- Encrypted/hashed in production
   twitter_username TEXT,
+  twitter_email TEXT,
+  twitter_password TEXT, -- Encrypted/hashed in production
   x_api_key TEXT,
   dm_schedule JSONB,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

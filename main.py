@@ -59,7 +59,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         token = credentials.credentials
         
         # Use Supabase to validate the token and get user info
-        # Set the auth header for this request
+        # Set the auth header for this requeest
         supabase.auth.set_session(token)
         
         # Get the user from the token
@@ -728,24 +728,47 @@ async def send_direct_message_endpoint(
     user_id = current_user["user_id"]
     settings = current_user["settings"]
     
-    # Validate platform-specific credentials from settings
+    # Get platform-specific credentials from settings
     if dm_request.platform.lower() == "twitter":
         twitter_username = settings.get("twitter_username")
-        if not twitter_username:
-            raise HTTPException(status_code=400, detail="Twitter username not configured. Please add your Twitter credentials in settings.")
-            
-        # Note: For security, we don't store Twitter email/password in settings
-        # This would need to be handled differently (e.g., OAuth tokens)
-        raise HTTPException(status_code=501, detail="Twitter DM functionality requires OAuth implementation for security. Password-based authentication is not supported in user settings.")
+        twitter_email = settings.get("twitter_email")  # We'll need to add this to schema
+        twitter_password = settings.get("twitter_password")  # We'll need to add this to schema
+        
+        if not all([twitter_username, twitter_email, twitter_password]):
+            raise HTTPException(status_code=400, detail="Twitter credentials not fully configured. Please add your Twitter username, email, and password in settings.")
+        
+        return await send_direct_message_unified(
+            platform=dm_request.platform,
+            recipient_id=dm_request.recipient_id,
+            message=dm_request.message,
+            media_ids=dm_request.media_ids,
+            subject=dm_request.subject,
+            twitter_username=twitter_username,
+            twitter_email=twitter_email,
+            twitter_password=twitter_password,
+            reddit_username=None,
+            reddit_password=None
+        )
         
     elif dm_request.platform.lower() == "reddit":
         reddit_username = settings.get("reddit_username")
-        if not reddit_username:
-            raise HTTPException(status_code=400, detail="Reddit username not configured. Please add your Reddit credentials in settings.")
-            
-        # Note: For security, we don't store Reddit password in settings  
-        # This would need to be handled differently (e.g., OAuth tokens)
-        raise HTTPException(status_code=501, detail="Reddit DM functionality requires secure credential handling. Password storage in settings is not recommended for security reasons.")
+        reddit_password = settings.get("reddit_password")  # We'll need to add this to schema
+        
+        if not all([reddit_username, reddit_password]):
+            raise HTTPException(status_code=400, detail="Reddit credentials not fully configured. Please add your Reddit username and password in settings.")
+        
+        return await send_direct_message_unified(
+            platform=dm_request.platform,
+            recipient_id=dm_request.recipient_id,
+            message=dm_request.message,
+            media_ids=dm_request.media_ids,
+            subject=dm_request.subject,
+            twitter_username=None,
+            twitter_email=None,
+            twitter_password=None,
+            reddit_username=reddit_username,
+            reddit_password=reddit_password
+        )
         
     else:
         raise HTTPException(status_code=400, detail="Invalid platform. Use 'twitter' or 'reddit'.")
