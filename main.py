@@ -20,6 +20,7 @@ import ssl
 import tweepy
 from supabase import create_client, Client
 import jwt
+from rate_limiter import RateLimiter
 
 load_dotenv()
 
@@ -33,6 +34,9 @@ if not all([supabase_url, supabase_anon_key]):
     raise ValueError("Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables.")
 
 supabase: Client = create_client(supabase_url, supabase_anon_key)
+
+# Initialize rate limiter
+rate_limiter = RateLimiter(supabase)
 
 # Security scheme for Bearer token
 security = HTTPBearer()
@@ -597,7 +601,21 @@ async def search_social(search: SearchQuery, current_user: dict = Depends(get_cu
     Requires Supabase JWT authentication
     """
     user_id = current_user["user_id"]
+    user_data = current_user["user"]
     settings = current_user["settings"]
+    user_plan = user_data.get("plan", "free")
+    
+    # Check rate limits
+    allowed, error_message, usage_stats = await rate_limiter.check_and_increment_limit(
+        user_id=user_id,
+        user_plan=user_plan,
+        action_type="search",
+        endpoint="search",
+        platform=search.platform.lower()
+    )
+    
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_message)
     
     # For Twitter, use user's API key from settings or fallback to environment
     if search.platform.lower() == "twitter":
@@ -727,12 +745,41 @@ async def send_direct_message_endpoint(
     
     user_id = current_user["user_id"]
     settings = current_user["settings"]
+    user_data = current_user["user"]
+    user_plan = user_data.get("plan", "free")
+    
+    # Check rate limits
+    allowed, error_message, usage_stats = await rate_limiter.check_and_increment_limit(
+        user_id=user_id,
+        user_plan=user_plan,
+        action_type="dm",
+        endpoint="send-dm",
+        platform=dm_request.platform.lower()
+    )
+    
+    if not allowed:
+        raise HTTPException(status_code=429, detail=error_message)
     
     # Get platform-specific credentials from settings
     if dm_request.platform.lower() == "twitter":
-        twitter_username = settings.get("twitter_username")
-        twitter_email = settings.get("twitter_email")  # We'll need to add this to schema
-        twitter_password = settings.get("twitter_password")  # We'll need to add this to schema
+        # Import decryption utilities
+        from decrypt_credentials import CredentialEncryption, get_user_data_from_jwt
+        
+        # Get JWT payload from user data
+        jwt_user_data = {
+            'sub': user_data.get('id'),
+            'email': user_data.get('email', ''),
+            'created_at': user_data.get('created_at', ''),
+            'aud': user_data.get('aud', 'authenticated')
+        }
+        user_key_data = get_user_data_from_jwt(jwt_user_data)
+        
+        # Decrypt credentials
+        decrypted_credentials = CredentialEncryption.decrypt_user_credentials(settings, user_key_data)
+        
+        twitter_username = decrypted_credentials.get("twitter_username")
+        twitter_email = decrypted_credentials.get("twitter_email")
+        twitter_password = decrypted_credentials.get("twitter_password")
         
         if not all([twitter_username, twitter_email, twitter_password]):
             raise HTTPException(status_code=400, detail="Twitter credentials not fully configured. Please add your Twitter username, email, and password in settings.")
@@ -751,8 +798,8 @@ async def send_direct_message_endpoint(
         )
         
     elif dm_request.platform.lower() == "reddit":
-        reddit_username = settings.get("reddit_username")
-        reddit_password = settings.get("reddit_password")  # We'll need to add this to schema
+        reddit_username = decrypted_credentials.get("reddit_client_username")
+        reddit_password = decrypted_credentials.get("reddit_client_password")  # We'll need to add this to schema
         
         if not all([reddit_username, reddit_password]):
             raise HTTPException(status_code=400, detail="Reddit credentials not fully configured. Please add your Reddit username and password in settings.")
@@ -809,6 +856,27 @@ async def get_user_info_platform(platform: str, username: str, current_user: dic
         return await get_reddit_user_by_username(username)
     else:
         raise HTTPException(status_code=400, detail="Invalid platform. Use 'twitter' or 'reddit'.")
+
+@app.get("/usage")
+async def get_usage_stats(current_user: dict = Depends(get_current_user)):
+    """
+    Get current usage statistics and rate limits for the authenticated user
+    Requires Supabase JWT authentication
+    
+    Returns usage counts, limits, and remaining quotas based on user's plan
+    """
+    user_id = current_user["user_id"]
+    user_data = current_user["user"]
+    user_plan = user_data.get("plan", "free")
+    
+    try:
+        usage_summary = await rate_limiter.get_usage_summary(user_id, user_plan)
+        return {
+            "success": True,
+            "data": usage_summary
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving usage stats: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
