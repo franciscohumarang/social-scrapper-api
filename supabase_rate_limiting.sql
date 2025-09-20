@@ -149,22 +149,42 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Enable Row Level Security (RLS) for data protection
-ALTER TABLE usage_tracking ENABLE ROW LEVEL SECURITY;
-ALTER TABLE user_usage_stats ENABLE ROW LEVEL SECURITY;
+-- Note: RLS is disabled for API usage - authorization handled in application layer
+-- ALTER TABLE usage_tracking ENABLE ROW LEVEL SECURITY;
+-- ALTER TABLE user_usage_stats ENABLE ROW LEVEL SECURITY;
 
--- RLS Policies: Users can only see their own usage data
+-- RLS Policies: Allow service role to manage all data (for API usage)
+CREATE POLICY "Service role can manage all usage data" ON usage_tracking
+    FOR ALL USING (auth.role() = 'service_role');
+
+CREATE POLICY "Service role can manage all usage stats" ON user_usage_stats
+    FOR ALL USING (auth.role() = 'service_role');
+
+-- Allow authenticated users to view their own data (if using Supabase auth)
 CREATE POLICY "Users can view own usage tracking" ON usage_tracking
     FOR SELECT USING (auth.uid()::text = user_id);
 
 CREATE POLICY "Users can view own usage stats" ON user_usage_stats  
     FOR SELECT USING (auth.uid()::text = user_id);
 
--- Admin policies (if needed)
-CREATE POLICY "Service role can manage all usage data" ON usage_tracking
-    FOR ALL USING (auth.role() = 'service_role');
+-- Alternative: Custom policies for JWT-based authentication
+-- These policies allow access when user_id matches the JWT claim
+-- Note: This requires the JWT to be properly set in the request context
+CREATE POLICY "JWT users can view own usage tracking" ON usage_tracking
+    FOR SELECT USING (
+        user_id = COALESCE(
+            current_setting('request.jwt.claims', true)::json->>'user_id',
+            current_setting('request.jwt.claims', true)::json->>'sub'
+        )
+    );
 
-CREATE POLICY "Service role can manage all usage stats" ON user_usage_stats
-    FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "JWT users can view own usage stats" ON user_usage_stats  
+    FOR SELECT USING (
+        user_id = COALESCE(
+            current_setting('request.jwt.claims', true)::json->>'user_id',
+            current_setting('request.jwt.claims', true)::json->>'sub'
+        )
+    );
 
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_usage_stats_user_id ON user_usage_stats(user_id);

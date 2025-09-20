@@ -1,8 +1,9 @@
 import asyncio
 import os
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.middleware.base import BaseHTTPMiddleware
 import aiohttp
 import requests
 import asyncpraw
@@ -12,6 +13,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 import json
 import time
+import logging
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import random
@@ -23,6 +25,10 @@ import jwt
 from rate_limiter import RateLimiter
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -41,13 +47,25 @@ rate_limiter = RateLimiter(supabase)
 # Security scheme for Bearer token
 security = HTTPBearer()
 
+# Custom middleware to add security headers
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = "http://localhost:8080"
+        response.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        return response
+
+# Add custom security headers middleware
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Add CORS middleware to handle OPTIONS requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8080"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_methods=["POST", "GET", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"]
 )
 
 # Cache for Twitter results
@@ -61,34 +79,63 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     """
     try:
         token = credentials.credentials
-        
-        # Use Supabase to validate the token and get user info
-        # Set the auth header for this requeest
-        supabase.auth.set_session(token)
+        logger.info(f"Processing JWT token: {token[:50]}...")
         
         # Get the user from the token
         user = supabase.auth.get_user(token)
+        logger.info(f"Supabase auth response: {user}")
+        
         if not user or not user.user:
+            logger.error("Invalid or expired token - no user data returned")
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         
         user_id = user.user.id
+        logger.info(f"Extracted user_id from JWT: {user_id}")
+        logger.info(f"User email from JWT: {user.user.email}")
+        logger.info(f"Full user data from JWT: {user.user}")
         
         # Fetch user data from users table
-        user_response = supabase.table("users").select("*").eq("id", user_id).execute()
+        logger.info(f"Querying users table for user_id: {user_id}")
+        logger.info(f"User_id type: {type(user_id)}")
+        logger.info(f"User_id length: {len(str(user_id))}")
+        
+        # Try with explicit string conversion
+        user_id_str = str(user_id)
+        logger.info(f"Converted user_id to string: {user_id_str}")
+        
+        user_response = supabase.table("users").select("*").eq("id", user_id_str).execute()
+        logger.info(f"Users table query response: {user_response}")
+        logger.info(f"Users table data: {user_response.data}")
+        logger.info(f"Users table count: {user_response.count}")
+        logger.info(f"Users table status_code: {getattr(user_response, 'status_code', 'N/A')}")
+        
+        # Also try a broader query to see if there are any users at all
+        try:
+            all_users_response = supabase.table("users").select("id").limit(5).execute()
+            logger.info(f"Sample users in table: {all_users_response.data}")
+        except Exception as sample_error:
+            logger.error(f"Error fetching sample users: {sample_error}")
+        
         user_data = user_response.data[0] if user_response.data else None
         
         if not user_data:
+            logger.error(f"User not found in database for user_id: {user_id_str}")
+            logger.error(f"Available users in response: {user_response.data}")
             raise HTTPException(status_code=404, detail="User not found in database")
         
         # Fetch user settings
+        logger.info(f"Querying settings table for user_id: {user_id}")
         settings_response = supabase.table("settings").select("*").eq("user_id", user_id).execute()
+        logger.info(f"Settings table query response: {settings_response}")
         settings = settings_response.data[0] if settings_response.data else {}
         
-        return {
+        result = {
             "user_id": user_id,
             "user": user_data,
             "settings": settings
         }
+        logger.info(f"Successfully authenticated user: {user_id}")
+        return result
         
     except Exception as e:
         if "Invalid token" in str(e) or "expired" in str(e).lower():

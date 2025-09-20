@@ -157,6 +157,10 @@ ALTER TABLE settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE archived_leads ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies for leads
+-- Note: Using service role for API access - authorization handled in application layer
+CREATE POLICY "Service role can manage all leads" ON leads
+  FOR ALL USING (auth.role() = 'service_role');
+
 CREATE POLICY "Users can view their own leads" ON leads
   FOR SELECT USING (auth.uid() = user_id);
 
