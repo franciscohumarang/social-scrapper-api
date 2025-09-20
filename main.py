@@ -925,6 +925,17 @@ async def get_usage_stats(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving usage stats: {str(e)}")
 
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for Cloud Run and load balancers
+    """
+    return {
+        "status": "healthy",
+        "service": "social-scrapper-api",
+        "timestamp": datetime.now().isoformat()
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000) 
