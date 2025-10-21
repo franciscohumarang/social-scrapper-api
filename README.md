@@ -45,18 +45,15 @@ chmod +x deploy.sh
 nano .env
 
 # Add the following variables:
-API_KEY=your_api_key
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
 TWITTER_CONSUMER_KEY=your_twitter_consumer_key
 TWITTER_CONSUMER_SECRET=your_twitter_consumer_secret
-X_USERNAME=your_twitter_username
-X_PASSWORD=your_twitter_password
-X_EMAIL=your_twitter_email
-X_EMAIL_PASSWORD=your_twitter_email_password
+TWITTER_API_IO_KEY=your_twitterapi_io_key
+TWITTER_PROXY=your_proxy_url
 REDDIT_CLIENT_ID=your_reddit_client_id
 REDDIT_CLIENT_SECRET=your_reddit_client_secret
 REDDIT_USER_AGENT=your_reddit_user_agent
-REDDIT_USERNAME=your_reddit_username
-REDDIT_PASSWORD=your_reddit_password
 ```
 
 6. **Restart the service**
@@ -78,20 +75,20 @@ sudo systemctl status nginx
 
 3. **Test the API**
 ```bash
-# Test search endpoint
+# Test search endpoint (requires Supabase JWT authentication)
 curl -X POST "http://your-ec2-ip/search" \
-     -H "X-API-KEY: your_api_key" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
-     -d '{"platform": "reddit", "query": "test"}'
+     -d '{"platform": "reddit", "query": "test", "limit": 10}'
 
-# Test DM endpoint
+# Test DM endpoint (requires Supabase JWT authentication)
 curl -X POST "http://your-ec2-ip/send-dm" \
-     -H "X-API-KEY: your_twitter_bearer_token" \
-     -H "X-ACCESS-TOKEN: your_user_access_token" \
-     -H "X-ACCESS-TOKEN-SECRET: your_user_access_token_secret" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
-     -d '{"recipient_id": "123456789", "message": "Hello from API!"}'
+     -d '{"platform": "twitter", "recipient_id": "123456789", "message": "Hello from API!"}'
 ```
+
+**Note**: All endpoints now require Supabase JWT authentication. User credentials (Twitter/Reddit) are stored encrypted in the database and retrieved automatically based on the authenticated user.
 
 ## API Endpoints
 
@@ -99,7 +96,7 @@ curl -X POST "http://your-ec2-ip/send-dm" \
 Search for content on Twitter or Reddit.
 
 **Headers:**
-- `X-API-KEY`: Twitter Bearer Token (required for Twitter searches, not needed for Reddit)
+- `Authorization`: Bearer token (Supabase JWT token - required for all requests)
 
 **Body:**
 ```json
@@ -146,6 +143,7 @@ Search for content on Twitter or Reddit.
       "content": "post content",
       "created": 1640995200,
       "score": 100,
+      "num_comments": 25,  // For submissions only
       "url": "https://reddit.com/r/subreddit/comments/post_id"
     }
   ]
@@ -156,7 +154,7 @@ Search for content on Twitter or Reddit.
 Get Twitter user information by username (useful for getting recipient_id for DMs).
 
 **Headers:**
-- `X-API-KEY`: Twitter Bearer Token
+- `Authorization`: Bearer token (Supabase JWT token - required)
 
 **Response:**
 ```json
@@ -173,7 +171,7 @@ Get Twitter user information by username (useful for getting recipient_id for DM
 Get user information by username for a specific platform.
 
 **Headers:**
-- `X-API-KEY`: Twitter Bearer Token (required for Twitter, not needed for Reddit)
+- `Authorization`: Bearer token (Supabase JWT token - required)
 
 **Twitter Response:**
 ```json
@@ -200,16 +198,10 @@ Get user information by username for a specific platform.
 ### POST /send-dm
 Send a direct message to a Twitter or Reddit user.
 
-**Headers (platform-specific):**
+**Headers:**
+- `Authorization`: Bearer token (Supabase JWT token - required)
 
-For Twitter:
-- `X-API-KEY`: Twitter Bearer Token (required)
-- `X-ACCESS-TOKEN`: User Access Token (required)
-- `X-ACCESS-TOKEN-SECRET`: User Access Token Secret (required)
-
-For Reddit:
-- `X-REDDIT-USERNAME`: Reddit username (required)
-- `X-REDDIT-PASSWORD`: Reddit password (required)
+**Note**: User credentials (Twitter username/email/password or Reddit username/password) are stored encrypted in the database and retrieved automatically based on the authenticated user.
 
 **Body:**
 ```json
@@ -222,17 +214,35 @@ For Reddit:
 }
 ```
 
-**Reddit Authentication:**
-Reddit DMs now require credentials via headers (no fallback to environment variables):
+**Response:**
 
-```bash
-# Send DM as specific Reddit user
-curl -X POST "http://your-server/send-dm" \
-     -H "X-REDDIT-USERNAME: your_reddit_username" \
-     -H "X-REDDIT-PASSWORD: your_reddit_password" \
-     -H "Content-Type: application/json" \
-     -d '{"platform": "reddit", "recipient_id": "recipient_user", "message": "Hello!"}'
+**Twitter DM Response:**
+```json
+{
+  "success": true,
+  "recipient_id": "123456789",
+  "message": "Your message here",
+  "media_ids": ["media_id_1"],
+  "response": {
+    // TwitterAPI.io response data
+  }
+}
 ```
+
+**Reddit DM Response:**
+```json
+{
+  "success": true,
+  "recipient_username": "username",
+  "sender_username": "your_username",
+  "message": "Your message here",
+  "subject": "Message subject",
+  "platform": "reddit"
+}
+```
+
+**Authentication:**
+All requests now use Supabase JWT authentication. User credentials are stored encrypted in the database and retrieved automatically based on the authenticated user.
 
 ## How to Get recipient_id for DMs
 
@@ -244,12 +254,13 @@ When you search for content, each result includes the `author_id`:
 ```bash
 # Search for tweets
 curl -X POST "http://your-server/search" \
-     -H "X-API-KEY: your_bearer_token" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
      -d '{"platform": "twitter", "query": "python", "limit": 5}'
 
 # Search for Reddit posts
 curl -X POST "http://your-server/search" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
      -d '{"platform": "reddit", "query": "python", "limit": 5}'
 
@@ -262,11 +273,11 @@ Use the `/user/{platform}/{username}` endpoint to get user information:
 ```bash
 # Get Twitter user info by username
 curl -X GET "http://your-server/user/twitter/elonmusk" \
-     -H "X-API-KEY: your_bearer_token"
+     -H "Authorization: Bearer your_supabase_jwt_token"
 
 # Get Reddit user info by username
 curl -X GET "http://your-server/user/reddit/username" \
-     -H "X-API-KEY: your_bearer_token"
+     -H "Authorization: Bearer your_supabase_jwt_token"
 ```
 
 ### Example Workflow
@@ -275,32 +286,124 @@ curl -X GET "http://your-server/user/reddit/username" \
 ```bash
 # 1. Get user ID by username
 curl -X GET "http://your-server/user/twitter/elonmusk" \
-     -H "X-API-KEY: your_bearer_token"
+     -H "Authorization: Bearer your_supabase_jwt_token"
 
 # Response: {"id": "44196397", "username": "elonmusk", ...}
 
 # 2. Send DM using the user ID
 curl -X POST "http://your-server/send-dm" \
-     -H "X-API-KEY: your_bearer_token" \
-     -H "X-ACCESS-TOKEN: your_access_token" \
-     -H "X-ACCESS-TOKEN-SECRET: your_access_token_secret" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
      -d '{"platform": "twitter", "recipient_id": "44196397", "message": "Hello!"}'
 ```
 
 **Reddit DM:**
 ```bash
-# 1. Get user info by username (no headers needed for Reddit)
-curl -X GET "http://your-server/user/reddit/username"
+# 1. Get user info by username
+curl -X GET "http://your-server/user/reddit/username" \
+     -H "Authorization: Bearer your_supabase_jwt_token"
 
 # Response: {"id": "username", "username": "username", ...}
 
-# 2. Send DM using the username (headers required)
+# 2. Send DM using the username
 curl -X POST "http://your-server/send-dm" \
-     -H "X-REDDIT-USERNAME: your_reddit_username" \
-     -H "X-REDDIT-PASSWORD: your_reddit_password" \
+     -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
      -d '{"platform": "reddit", "recipient_id": "username", "message": "Hello!", "subject": "Test message"}'
+```
+
+### GET /usage
+Get current usage statistics and rate limits for the authenticated user.
+
+**Headers:**
+- `Authorization`: Bearer token (Supabase JWT token - required)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "user_id": "user_uuid",
+    "plan": "free|premium|pro",
+    "usage_stats": {
+      "search": {
+        "twitter": {
+          "count": 15,
+          "limit": 100,
+          "remaining": 85,
+          "reset_time": "2023-01-01T00:00:00Z"
+        },
+        "reddit": {
+          "count": 8,
+          "limit": 100,
+          "remaining": 92,
+          "reset_time": "2023-01-01T00:00:00Z"
+        }
+      },
+      "dm": {
+        "twitter": {
+          "count": 3,
+          "limit": 10,
+          "remaining": 7,
+          "reset_time": "2023-01-01T00:00:00Z"
+        },
+        "reddit": {
+          "count": 1,
+          "limit": 10,
+          "remaining": 9,
+          "reset_time": "2023-01-01T00:00:00Z"
+        }
+      }
+    }
+  }
+}
+```
+
+### GET /health
+Health check endpoint for monitoring and load balancers.
+
+**Headers:**
+- None required
+
+**Response:**
+```json
+{
+  "status": "healthy",
+  "service": "social-scrapper-api",
+  "timestamp": "2023-01-01T00:00:00Z"
+}
+```
+
+## Authentication Setup
+
+The API now uses **Supabase JWT authentication** for all endpoints. User credentials (Twitter/Reddit) are stored encrypted in the database.
+
+### Supabase Setup
+
+1. **Create a Supabase project** at https://supabase.com/
+2. **Get your project credentials**:
+   - Project URL (`SUPABASE_URL`)
+   - Anonymous key (`SUPABASE_ANON_KEY`)
+3. **Set up authentication**:
+   - Enable email/password authentication in Supabase Auth settings
+   - Users will authenticate via Supabase Auth and receive JWT tokens
+4. **Database setup**:
+   - Create `users` table for user profiles
+   - Create `settings` table for encrypted credentials
+   - Set up Row Level Security (RLS) policies
+
+### Getting JWT Tokens
+
+Users authenticate through Supabase Auth and receive JWT tokens:
+
+```bash
+# Example: User login (handled by your frontend)
+curl -X POST "https://your-project.supabase.co/auth/v1/token?grant_type=password" \
+     -H "apikey: your_supabase_anon_key" \
+     -H "Content-Type: application/json" \
+     -d '{"email": "user@example.com", "password": "password"}'
+
+# Response includes access_token (JWT) to use in API requests
 ```
 
 ## Twitter API Setup
