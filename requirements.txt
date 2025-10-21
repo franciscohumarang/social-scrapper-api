@@ -10,4 +10,4 @@ tweepy==4.14.0
 requests==2.31.0
 supabase==2.3.4
 PyJWT==2.8.0
-cryptography==41.0.8
+cryptography>=40.0.0,<47.0.0
