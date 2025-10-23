@@ -113,6 +113,7 @@ class RateLimiter:
         """Get current usage statistics for a user"""
         try:
             # Call the Supabase function to get usage stats with automatic resets
+            # user_id is already a UUID string from the JWT token
             result = self.supabase.rpc('get_user_usage_stats', {'p_user_id': user_id}).execute()
             
             if result.data and len(result.data) > 0:
@@ -149,6 +150,7 @@ class RateLimiter:
     ) -> bool:
         """Increment usage counter using Supabase function"""
         try:
+            # user_id is already a UUID string from the JWT token
             result = self.supabase.rpc('increment_usage_counter', {
                 'p_user_id': user_id,
                 'p_action_type': action_type,

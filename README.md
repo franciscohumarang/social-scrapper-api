@@ -85,13 +85,13 @@ curl -X POST "http://your-ec2-ip/search" \
 curl -X POST "http://your-ec2-ip/send-dm" \
      -H "Authorization: Bearer your_supabase_jwt_token" \
      -H "Content-Type: application/json" \
-     -d '{"platform": "twitter", "recipient_id": "123456789", "message": "Hello from API!"}'
+     -d '{"platform": "titter", "recipient_id": "123456789", "message": "Hello from API!"}'
 ```
 
 **Note**: All endpoints now require Supabase JWT authentication. User credentials (Twitter/Reddit) are stored encrypted in the database and retrieved automatically based on the authenticated user.
 
 ## API Endpoints
-
+w
 ### POST /search
 Search for content on Twitter or Reddit.
 

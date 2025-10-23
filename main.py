@@ -35,11 +35,20 @@ app = FastAPI()
 # Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_anon_key = os.getenv("SUPABASE_ANON_KEY")
+supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not all([supabase_url, supabase_anon_key]):
     raise ValueError("Missing Supabase configuration. Please set SUPABASE_URL and SUPABASE_ANON_KEY environment variables.")
 
-supabase: Client = create_client(supabase_url, supabase_anon_key)
+# Use service role key for server-side operations (bypasses RLS)
+if supabase_service_key:
+    supabase: Client = create_client(supabase_url, supabase_service_key)
+    logger.info("Using Supabase service role key for server-side operations")
+    logger.info(f"Service role key starts with: {supabase_service_key[:20]}...")
+else:
+    supabase: Client = create_client(supabase_url, supabase_anon_key)
+    logger.warning("Using Supabase anon key - RLS policies may block access")
+    logger.info(f"Anon key starts with: {supabase_anon_key[:20]}...")
 
 # Initialize rate limiter
 rate_limiter = RateLimiter(supabase)
@@ -103,16 +112,39 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         user_id_str = str(user_id)
         logger.info(f"Converted user_id to string: {user_id_str}")
         
-        user_response = supabase.table("users").select("*").eq("id", user_id_str).execute()
-        logger.info(f"Users table query response: {user_response}")
-        logger.info(f"Users table data: {user_response.data}")
-        logger.info(f"Users table count: {user_response.count}")
-        logger.info(f"Users table status_code: {getattr(user_response, 'status_code', 'N/A')}")
+        # Query users table - column is 'id' with UUID data type
+        try:
+            import uuid
+            uuid_obj = uuid.UUID(user_id_str)
+            logger.info(f"Querying users table with UUID: {uuid_obj}")
+            logger.info(f"Querying users table with string UUID: {str(uuid_obj)}")
+            
+            user_response = supabase.table("users").select("*").eq("id", str(uuid_obj)).execute()
+            logger.info(f"Users table query response: {user_response}")
+            logger.info(f"Users table data: {user_response.data}")
+            logger.info(f"Users table count: {user_response.count}")
+            
+            # Also try without UUID conversion
+            user_response_2 = supabase.table("users").select("*").eq("id", user_id_str).execute()
+            logger.info(f"Direct string query response: {user_response_2.data}")
+            
+        except Exception as query_error:
+            logger.error(f"Error in user query: {query_error}")
+            user_response = type('obj', (object,), {'data': [], 'count': None})()
         
         # Also try a broader query to see if there are any users at all
         try:
             all_users_response = supabase.table("users").select("id").limit(5).execute()
             logger.info(f"Sample users in table: {all_users_response.data}")
+            logger.info(f"Sample users count: {len(all_users_response.data) if all_users_response.data else 0}")
+            
+            # Check if our specific user ID appears in the sample
+            if all_users_response.data:
+                for user in all_users_response.data:
+                    logger.info(f"Sample user id: {user.get('id')} (type: {type(user.get('id'))})")
+                    if str(user.get('id')) == user_id_str:
+                        logger.info(f"Found our user ID in sample data!")
+                        
         except Exception as sample_error:
             logger.error(f"Error fetching sample users: {sample_error}")
         
@@ -125,7 +157,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         
         # Fetch user settings
         logger.info(f"Querying settings table for user_id: {user_id}")
-        settings_response = supabase.table("settings").select("*").eq("user_id", user_id).execute()
+        settings_response = supabase.table("settings").select("*").eq("user_id", str(user_id)).execute()
         logger.info(f"Settings table query response: {settings_response}")
         settings = settings_response.data[0] if settings_response.data else {}
         
@@ -807,23 +839,23 @@ async def send_direct_message_endpoint(
     if not allowed:
         raise HTTPException(status_code=429, detail=error_message)
     
+    # Import decryption utilities and decrypt credentials for both platforms
+    from decrypt_credentials import CredentialEncryption, get_user_data_from_jwt
+    
+    # Get JWT payload from user data
+    jwt_user_data = {
+        'sub': user_data.get('id'),
+        'email': user_data.get('email', ''),
+        'created_at': user_data.get('created_at', ''),
+        'aud': user_data.get('aud', 'authenticated')
+    }
+    user_key_data = get_user_data_from_jwt(jwt_user_data)
+    
+    # Decrypt credentials
+    decrypted_credentials = CredentialEncryption.decrypt_user_credentials(settings, user_key_data)
+    
     # Get platform-specific credentials from settings
     if dm_request.platform.lower() == "twitter":
-        # Import decryption utilities
-        from decrypt_credentials import CredentialEncryption, get_user_data_from_jwt
-        
-        # Get JWT payload from user data
-        jwt_user_data = {
-            'sub': user_data.get('id'),
-            'email': user_data.get('email', ''),
-            'created_at': user_data.get('created_at', ''),
-            'aud': user_data.get('aud', 'authenticated')
-        }
-        user_key_data = get_user_data_from_jwt(jwt_user_data)
-        
-        # Decrypt credentials
-        decrypted_credentials = CredentialEncryption.decrypt_user_credentials(settings, user_key_data)
-        
         twitter_username = decrypted_credentials.get("twitter_username")
         twitter_email = decrypted_credentials.get("twitter_email")
         twitter_password = decrypted_credentials.get("twitter_password")
@@ -939,4 +971,7 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
+    logger.info(f"Supabase URL: {os.getenv('SUPABASE_URL', 'NOT_SET')}")
+    logger.info(f"Supabase Key: {'SET' if os.getenv('SUPABASE_ANON_KEY') else 'NOT_SET'}")
     uvicorn.run(app, host="0.0.0.0", port=port) 

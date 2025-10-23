@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:docs.twitterapi.io)"
+      "WebFetch(domain:docs.twitterapi.io)",
+      "Bash(python:*)",
+      "Bash(timeout:*)",
+      "Bash(SET PORT=8001)"
     ],
     "deny": []
   }

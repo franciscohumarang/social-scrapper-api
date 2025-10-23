@@ -37,12 +37,19 @@ steps:
       - '--timeout'
       - '300'
       - '--set-env-vars'
-      - 'SUPABASE_URL=${_SUPABASE_URL},SUPABASE_ANON_KEY=${_SUPABASE_ANON_KEY}'
+      - 'SUPABASE_URL=${_SUPABASE_URL},SUPABASE_ANON_KEY=${_SUPABASE_ANON_KEY},TWITTER_CONSUMER_KEY=${_TWITTER_CONSUMER_KEY},TWITTER_CONSUMER_SECRET=${_TWITTER_CONSUMER_SECRET},TWITTER_API_IO_KEY=${_TWITTER_API_IO_KEY},TWITTER_PROXY=${_TWITTER_PROXY},REDDIT_CLIENT_ID=${_REDDIT_CLIENT_ID},REDDIT_CLIENT_SECRET=${_REDDIT_CLIENT_SECRET},REDDIT_USER_AGENT=${_REDDIT_USER_AGENT}'
 
 # Substitution variables (set these in Cloud Build trigger)
 substitutions:
   _SUPABASE_URL: 'your-supabase-url'
   _SUPABASE_ANON_KEY: 'your-supabase-anon-key'
+  _TWITTER_CONSUMER_KEY: 'your-twitter-consumer-key'
+  _TWITTER_CONSUMER_SECRET: 'your-twitter-consumer-secret'
+  _TWITTER_API_IO_KEY: 'your-twitterapi-io-key'
+  _TWITTER_PROXY: 'your-proxy-url'
+  _REDDIT_CLIENT_ID: 'your-reddit-client-id'
+  _REDDIT_CLIENT_SECRET: 'your-reddit-client-secret'
+  _REDDIT_USER_AGENT: 'your-reddit-user-agent'
 
 # Store images in Container Registry
 images:

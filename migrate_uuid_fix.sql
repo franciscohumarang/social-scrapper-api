@@ -1,8 +1,26 @@
--- Rate Limiting and Usage Tracking Schema for Supabase
--- Run this in your Supabase SQL Editor
+-- Migration script to fix UUID type mismatch in rate limiting tables
+-- Run this in your Supabase SQL Editor to update existing schema
 
--- Create usage_tracking table for rate limiting and analytics
-CREATE TABLE IF NOT EXISTS usage_tracking (
+-- First, drop existing functions to avoid conflicts
+DROP FUNCTION IF EXISTS get_user_usage_stats(TEXT);
+DROP FUNCTION IF EXISTS increment_usage_counter(TEXT, VARCHAR(20), VARCHAR(50), VARCHAR(20));
+
+-- Drop existing policies to avoid conflicts
+DROP POLICY IF EXISTS "Users can view own usage tracking" ON usage_tracking;
+DROP POLICY IF EXISTS "Users can view own usage stats" ON user_usage_stats;
+DROP POLICY IF EXISTS "JWT users can view own usage tracking" ON usage_tracking;
+DROP POLICY IF EXISTS "JWT users can view own usage stats" ON user_usage_stats;
+
+-- If tables exist with TEXT user_id, we need to migrate them
+-- Note: This will only work if the tables don't have data yet
+-- If they have data, you'll need to manually migrate the data
+
+-- Drop and recreate tables with UUID user_id
+DROP TABLE IF EXISTS usage_tracking CASCADE;
+DROP TABLE IF EXISTS user_usage_stats CASCADE;
+
+-- Recreate tables with correct UUID types
+CREATE TABLE usage_tracking (
     id SERIAL PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     endpoint VARCHAR(50) NOT NULL, -- 'search' or 'send-dm'
@@ -11,8 +29,7 @@ CREATE TABLE IF NOT EXISTS usage_tracking (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Create user_usage_stats table for quick lookups (optional optimization)
-CREATE TABLE IF NOT EXISTS user_usage_stats (
+CREATE TABLE user_usage_stats (
     id SERIAL PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE UNIQUE,
     
@@ -38,7 +55,7 @@ CREATE TABLE IF NOT EXISTS user_usage_stats (
     CONSTRAINT unique_user_stats UNIQUE(user_id)
 );
 
--- Function to reset counters when time periods change
+-- Recreate the trigger function
 CREATE OR REPLACE FUNCTION reset_usage_counters()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -68,12 +85,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Trigger to automatically reset counters
+-- Recreate the trigger
 CREATE TRIGGER reset_usage_counters_trigger
     BEFORE UPDATE ON user_usage_stats
     FOR EACH ROW EXECUTE FUNCTION reset_usage_counters();
 
--- Function to increment usage counters
+-- Recreate functions with UUID parameters
 CREATE OR REPLACE FUNCTION increment_usage_counter(
     p_user_id UUID,
     p_action_type VARCHAR(20),
@@ -115,7 +132,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to get user usage stats with automatic counter reset
 CREATE OR REPLACE FUNCTION get_user_usage_stats(p_user_id UUID)
 RETURNS TABLE(
     searches_month INTEGER,
@@ -148,12 +164,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Enable Row Level Security (RLS) for data protection
--- Note: RLS is disabled for API usage - authorization handled in application layer
--- ALTER TABLE usage_tracking ENABLE ROW LEVEL SECURITY;
--- ALTER TABLE user_usage_stats ENABLE ROW LEVEL SECURITY;
-
--- RLS Policies: Allow service role to manage all data (for API usage)
+-- Recreate RLS policies
 CREATE POLICY "Service role can manage all usage data" ON usage_tracking
     FOR ALL USING (auth.role() = 'service_role');
 
@@ -168,8 +179,6 @@ CREATE POLICY "Users can view own usage stats" ON user_usage_stats
     FOR SELECT USING (auth.uid() = user_id);
 
 -- Alternative: Custom policies for JWT-based authentication
--- These policies allow access when user_id matches the JWT claim
--- Note: This requires the JWT to be properly set in the request context
 CREATE POLICY "JWT users can view own usage tracking" ON usage_tracking
     FOR SELECT USING (
         user_id = COALESCE(
@@ -186,7 +195,7 @@ CREATE POLICY "JWT users can view own usage stats" ON user_usage_stats
         )
     );
 
--- Create indexes for performance
+-- Recreate indexes for performance
 CREATE INDEX IF NOT EXISTS idx_usage_stats_user_id ON user_usage_stats(user_id);
 CREATE INDEX IF NOT EXISTS idx_usage_tracking_user_created ON usage_tracking(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_user_endpoint_created ON usage_tracking(user_id, endpoint, created_at);
@@ -199,10 +208,7 @@ GRANT SELECT, INSERT, UPDATE ON user_usage_stats TO authenticated;
 GRANT EXECUTE ON FUNCTION increment_usage_counter TO authenticated;
 GRANT EXECUTE ON FUNCTION get_user_usage_stats TO authenticated;
 
--- Sample data for testing (optional - remove in production)
--- INSERT INTO usage_tracking (user_id, endpoint, action_type, platform) 
--- VALUES ('00000000-0000-0000-0000-000000000000', 'search', 'search', 'twitter');
-
+-- Add comments
 COMMENT ON TABLE usage_tracking IS 'Tracks all API usage for rate limiting and analytics';
 COMMENT ON TABLE user_usage_stats IS 'Optimized counters for quick rate limit checks';
 COMMENT ON FUNCTION increment_usage_counter IS 'Safely increment usage counters for a user';
